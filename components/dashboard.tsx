@@ -9,6 +9,7 @@ import {
 import {
   MetricChart,
   PM_METRICS,
+  PREV_SUFFIX,
   StackedParticulateChart,
   particulateTotal,
   type SeriesPoint,
@@ -53,6 +54,19 @@ const RANGES = [
   { label: "30d", minutes: 43200 },
 ];
 
+/**
+ * Overlay presets. `null` offset means "the window immediately before this one",
+ * which is derived from the range rather than fixed.
+ */
+const COMPARE = [
+  { id: "off", label: "Off", offsetMs: 0 },
+  { id: "prev", label: "Previous period", offsetMs: null },
+  { id: "day", label: "Yesterday", offsetMs: 86_400_000 },
+  { id: "week", label: "Last week", offsetMs: 604_800_000 },
+] as const;
+
+type CompareId = (typeof COMPARE)[number]["id"];
+
 /** Headline figures, in reading order. */
 const HERO: MetricKey[] = ["aqi", "co2", "pm2p5", "voc"];
 
@@ -91,6 +105,7 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
   const [selected, setSelected] = usePersistentState<MetricKey[]>("metrics", DEFAULT_METRICS);
   const [showStack, setShowStack] = usePersistentState<boolean>("stack", true);
   const [showTable, setShowTable] = usePersistentState<boolean>("table", false);
+  const [compare, setCompare] = usePersistentState<CompareId>("compare", "off");
   const [order, setOrder, orderMeta] = usePersistentState<string[]>("order", DEFAULT_ORDER);
 
   const [points, setPoints] = useState<SeriesPoint[]>([]);
@@ -162,14 +177,34 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
       const res = await fetch(`/api/series?${q}`, { cache: "no-store" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-      setPoints(json.points ?? []);
+      let merged: SeriesPoint[] = json.points ?? [];
+
+      // Overlay: refetch the same window shifted back, then fold it onto the
+      // primary timeline so both series share one x-axis.
+      const preset = COMPARE.find((c) => c.id === compare);
+      if (preset && preset.id !== "off") {
+        const from = Number(json.from);
+        const to = Number(json.to);
+        const offset = preset.offsetMs ?? to - from;
+        const pq = new URLSearchParams({
+          sensor,
+          metrics: wanted.join(","),
+          from: String(from - offset),
+          to: String(to - offset),
+        });
+        const pres = await fetch(`/api/series?${pq}`, { cache: "no-store" });
+        const pjson = await pres.json();
+        if (pres.ok) merged = overlay(merged, pjson.points ?? [], offset, wanted);
+      }
+
+      setPoints(merged);
       setSeriesError(null);
     } catch (e) {
       setSeriesError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [sensor, selected, rangeMin, mode, customFrom, customTo]);
+  }, [sensor, selected, rangeMin, mode, customFrom, customTo, compare]);
 
   useEffect(() => {
     setLoading(true);
@@ -210,6 +245,8 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
   const device = devices.find((d) => d.sensor_id === sensor);
   const at = reading?.ts ? new Date(reading.ts) : null;
   const pmTotal = particulateTotal(points);
+  const compareLabel =
+    compare === "off" ? null : (COMPARE.find((c) => c.id === compare)?.label ?? null);
   const layoutDirty = orderMeta.hydrated && order.join() !== DEFAULT_ORDER.join();
 
   return (
@@ -389,6 +426,23 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
             )}
           </div>
 
+          <label className="flex items-center gap-2">
+            <span className="micro text-muted-foreground">Compare</span>
+            <select
+              value={compare}
+              onChange={(e) => setCompare(e.target.value as CompareId)}
+              className="h-8 rounded-md border border-(--hairline) bg-(--surface-panel) px-2 text-[11px] outline-none focus:border-white/25"
+              aria-label="Overlay an earlier window"
+              title="Overlay the same window from an earlier period"
+            >
+              {COMPARE.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
             <span className="micro text-muted-foreground">Charts</span>
             {grouped.map(([group, list]) => (
@@ -553,7 +607,12 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
                     {isStack ? (
                       <StackedParticulateChart points={points} />
                     ) : (
-                      <MetricChart metric={m!} points={points} tone={gradeReading(m!, s?.value, s?.status).tone} />
+                      <MetricChart
+                        metric={m!}
+                        points={points}
+                        tone={gradeReading(m!, s?.value, s?.status).tone}
+                        compareLabel={compareLabel}
+                      />
                     )}
                   </figure>
                 );
@@ -579,6 +638,63 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
       </main>
     </div>
   );
+}
+
+/**
+ * Folds an earlier window onto the current timeline.
+ *
+ * Each historical point is shifted forward by `offset` and snapped to the
+ * nearest current bucket, so "10:15 yesterday" lines up with "10:15 today"
+ * even though the two queries bucket independently. Anything further than half
+ * a bucket away is dropped rather than smeared onto the wrong slot.
+ */
+function overlay(
+  current: SeriesPoint[],
+  previous: SeriesPoint[],
+  offset: number,
+  metrics: string[],
+): SeriesPoint[] {
+  if (current.length === 0 || previous.length === 0) return current;
+
+  // Walk both series in step, carrying the most recent historical value
+  // forward. Matching exact bucket slots instead would miss most buckets — the
+  // two queries bucket independently, so their boundaries rarely coincide — and
+  // every miss renders as a drop to zero rather than a gap.
+  const sorted = [...previous].sort((a, b) => a.t - b.t);
+
+  // Seed with each metric's earliest historical value. Bucket boundaries rarely
+  // line up exactly, so the first bucket or two of the current window have no
+  // history behind them yet — and the chart draws a missing value as zero, not
+  // as a gap, which reads as a dramatic spike from the axis. Carrying the first
+  // known value backwards over those one or two buckets keeps the reference
+  // line honest and removes the artifact.
+  const last: Record<string, number> = {};
+  for (const m of metrics) {
+    const first = sorted.find((p) => {
+      const v = p[m];
+      return v !== null && v !== undefined && Number.isFinite(Number(v));
+    });
+    if (first) last[m] = Number(first[m]);
+  }
+
+  let j = 0;
+  return current.map((p) => {
+    const target = p.t - offset;
+    while (j < sorted.length && sorted[j].t <= target) {
+      for (const m of metrics) {
+        const v = sorted[j][m];
+        if (v !== null && v !== undefined && Number.isFinite(Number(v))) last[m] = Number(v);
+      }
+      j++;
+    }
+    if (Object.keys(last).length === 0) return p;
+
+    const row: SeriesPoint = { ...p };
+    for (const m of metrics) {
+      if (m in last) row[`${m}${PREV_SUFFIX}`] = last[m];
+    }
+    return row;
+  });
 }
 
 /** Formats a Date for <input type="datetime-local"> in the viewer's own zone. */
@@ -639,43 +755,182 @@ function Chip({
 }
 
 /** Accessible fallback for the charts — same numbers, no colour required. */
+const PAGE_SIZES = [25, 50, 100, 250];
+
+/**
+ * The numbers behind the charts: sortable, paginated, and colour-free — this is
+ * also the accessible route to the same data.
+ */
 function TableView({ points }: { points: SeriesPoint[] }) {
-  const rows = [...points].reverse().slice(0, 500);
+  const [sortKey, setSortKey] = useState<string>("t");
+  const [asc, setAsc] = useState(false); // newest first by default
+  const [pageSize, setPageSize] = useState(50);
+  const [page, setPage] = useState(0);
+
+  const sorted = useMemo(() => {
+    const rows = [...points];
+    rows.sort((a, b) => {
+      const av = sortKey === "t" ? a.t : a[sortKey];
+      const bv = sortKey === "t" ? b.t : b[sortKey];
+      // Missing readings sort last regardless of direction.
+      const an = av === null || av === undefined ? null : Number(av);
+      const bn = bv === null || bv === undefined ? null : Number(bv);
+      if (an === null && bn === null) return 0;
+      if (an === null) return 1;
+      if (bn === null) return -1;
+      return asc ? an - bn : bn - an;
+    });
+    return rows;
+  }, [points, sortKey, asc]);
+
+  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+  // Clamp rather than store a page that no longer exists after a filter change.
+  const current = Math.min(page, pageCount - 1);
+  const start = current * pageSize;
+  const rows = sorted.slice(start, start + pageSize);
+
+  function sortBy(key: string) {
+    if (key === sortKey) setAsc(!asc);
+    else {
+      setSortKey(key);
+      setAsc(false);
+    }
+    setPage(0);
+  }
+
+  const arrow = (key: string) => (sortKey === key ? (asc ? "↑" : "↓") : "");
+
   return (
-    <div className="panel overflow-x-auto">
-      <table className="w-full text-xs">
-        <thead className="border-b border-(--hairline) text-left">
-          <tr>
-            <th className="px-3 py-2 font-medium text-muted-foreground">Time</th>
-            {METRICS.map((m) => (
-              <th key={m.key} className="px-3 py-2 text-right font-medium text-muted-foreground">
-                {m.label}
+    <div className="panel">
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="border-b border-(--hairline) text-left">
+            <tr>
+              <th className="sticky left-0 bg-(--surface-panel) px-3 py-2 font-medium">
+                <button
+                  onClick={() => sortBy("t")}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  Time <span className="text-foreground">{arrow("t")}</span>
+                </button>
               </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((p) => (
-            <tr key={p.t} className="border-b border-(--hairline)/50">
-              <td className="figure whitespace-nowrap px-3 py-1.5 text-muted-foreground">
-                {new Date(p.t).toLocaleString()}
-              </td>
               {METRICS.map((m) => (
-                <td key={m.key} className="figure px-3 py-1.5 text-right">
-                  {p[m.key] === null || p[m.key] === undefined
-                    ? "—"
-                    : formatValue(Number(p[m.key]), m)}
-                </td>
+                <th key={m.key} className="px-3 py-2 text-right font-medium">
+                  <button
+                    onClick={() => sortBy(m.key)}
+                    className="text-muted-foreground hover:text-foreground"
+                    title={`Sort by ${m.label}`}
+                  >
+                    {m.label} <span className="text-foreground">{arrow(m.key)}</span>
+                  </button>
+                  {m.unit && (
+                    <span className="ml-1 font-normal text-muted-foreground/60">{m.unit}</span>
+                  )}
+                </th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
-      {rows.length === 0 && (
+          </thead>
+          <tbody>
+            {rows.map((p) => (
+              <tr key={p.t} className="border-b border-(--hairline)/50 hover:bg-white/[0.02]">
+                <td className="figure sticky left-0 whitespace-nowrap bg-(--surface-panel) px-3 py-1.5 text-muted-foreground">
+                  {new Date(p.t).toLocaleString()}
+                </td>
+                {METRICS.map((m) => (
+                  <td key={m.key} className="figure px-3 py-1.5 text-right">
+                    {p[m.key] === null || p[m.key] === undefined
+                      ? "—"
+                      : formatValue(Number(p[m.key]), m)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {sorted.length === 0 ? (
         <p className="px-3 py-10 text-center text-xs text-muted-foreground">
           No data in this window
         </p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-(--hairline) px-3 py-2">
+          <span className="figure text-[11px] text-muted-foreground">
+            {(start + 1).toLocaleString()}–{Math.min(start + pageSize, sorted.length).toLocaleString()}{" "}
+            of {sorted.length.toLocaleString()}
+          </span>
+
+          <label className="flex items-center gap-1.5">
+            <span className="micro text-muted-foreground/60">Rows</span>
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setPage(0);
+              }}
+              className="h-7 rounded-md border border-(--hairline) bg-(--surface-panel) px-1.5 text-[11px] outline-none focus:border-white/25"
+              aria-label="Rows per page"
+            >
+              {PAGE_SIZES.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="ml-auto flex items-center gap-1">
+            <PageButton onClick={() => setPage(0)} disabled={current === 0} label="First">
+              «
+            </PageButton>
+            <PageButton
+              onClick={() => setPage(current - 1)}
+              disabled={current === 0}
+              label="Previous"
+            >
+              ‹
+            </PageButton>
+            <span className="figure px-2 text-[11px] text-muted-foreground">
+              {current + 1} / {pageCount}
+            </span>
+            <PageButton
+              onClick={() => setPage(current + 1)}
+              disabled={current >= pageCount - 1}
+              label="Next"
+            >
+              ›
+            </PageButton>
+            <PageButton
+              onClick={() => setPage(pageCount - 1)}
+              disabled={current >= pageCount - 1}
+              label="Last"
+            >
+              »
+            </PageButton>
+          </div>
+        </div>
       )}
     </div>
+  );
+}
+
+function PageButton({
+  onClick, disabled, label, children,
+}: {
+  onClick: () => void;
+  disabled: boolean;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      className="inline-flex size-7 items-center justify-center rounded-md border border-(--hairline) text-muted-foreground transition hover:bg-white/5 hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+    >
+      {children}
+    </button>
   );
 }

@@ -59,28 +59,57 @@ function tickEvery(count: number): number {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** One metric, one chart, one axis. */
+/** Comparison series live alongside the primary one under this suffix. */
+export const PREV_SUFFIX = "__prev";
+
+/**
+ * The past reads as recessive: no fill, a dashed muted stroke. The eye lands on
+ * "now" first and treats the overlay as a reference line, which is the whole
+ * point of the comparison.
+ */
+const PREV_COLORS = { light: ["#898781"], dark: ["#898781"] };
+
+/** One metric, one chart, one axis — optionally overlaid with an earlier window. */
 export function MetricChart({
   metric,
   points,
   tone = "neutral",
+  compareLabel,
 }: {
   metric: MetricDef;
   points: SeriesPoint[];
   /** Status level of the latest reading — drives the series colour. */
   tone?: StatusTone;
+  /** When set, an earlier window is overlaid and named this in the legend. */
+  compareLabel?: string | null;
 }) {
+  const prevKey = `${metric.key}${PREV_SUFFIX}`;
+  const hasPrev = Boolean(
+    compareLabel && points.some((p) => p[prevKey] !== null && p[prevKey] !== undefined),
+  );
+
   const data = useMemo(() => {
     const rows = points
+      // Anchored on "now": a bucket with no current reading has nothing to
+      // compare against, and the chart would draw the missing value as zero
+      // rather than as a gap.
       .filter((p) => p[metric.key] !== null && p[metric.key] !== undefined)
-      .map((p) => ({ t: p.t, [metric.key]: Number(p[metric.key]) }));
-    return withLabels(rows, spanOf(points));
-  }, [points, metric.key]);
+      .map((p) => {
+        const row: Record<string, number> = { t: p.t, [metric.key]: Number(p[metric.key]) };
+        // Same rule for the overlay: only carry it where it actually has a value.
+        if (hasPrev && p[prevKey] !== null && p[prevKey] !== undefined) {
+          row[prevKey] = Number(p[prevKey]);
+        }
+        return row;
+      });
+    return withLabels(rows as ({ t: number } & Record<string, number | null>)[], spanOf(points));
+  }, [points, metric.key, prevKey, hasPrev]);
 
-  const config = useMemo<ChartConfig>(
-    () => ({ [metric.key]: { label: metric.label, colors: TONE_RAMP[tone] } }),
-    [metric.key, metric.label, tone],
-  );
+  const config = useMemo<ChartConfig>(() => {
+    const c: ChartConfig = { [metric.key]: { label: "Now", colors: TONE_RAMP[tone] } };
+    if (hasPrev) c[prevKey] = { label: compareLabel!, colors: PREV_COLORS };
+    return c;
+  }, [metric.key, prevKey, tone, hasPrev, compareLabel]);
 
   if (data.length === 0) return <EmptyChart />;
 
@@ -92,7 +121,7 @@ export function MetricChart({
       config={config}
       xDataKey="label"
       curveType="linear"
-      className="h-[190px] w-full"
+      className={hasPrev ? "h-[210px] w-full" : "h-[190px] w-full"}
     >
       <EChartsAreaChart.Grid />
       <EChartsAreaChart.XAxis
@@ -105,6 +134,17 @@ export function MetricChart({
         tickFormatter={(v) => compact(v, metric.decimals)}
       />
       <EChartsAreaChart.Tooltip position="fixed" />
+      {hasPrev && <EChartsAreaChart.Legend align="left" verticalAlign="top" />}
+      {/* The past is drawn first so "now" sits on top of it. */}
+      {hasPrev && (
+        <EChartsAreaChart.Area
+          dataKey={prevKey}
+          variant="none"
+          strokeVariant="dashed"
+          strokeWidth={1.5}
+          connectNulls
+        />
+      )}
       <EChartsAreaChart.Area
         dataKey={metric.key}
         variant="gradient"
