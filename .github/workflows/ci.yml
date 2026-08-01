@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Type errors fail the build below, but run tsc explicitly so the
+      # failure names the file instead of hiding inside the Next output.
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # The build needs the env vars to exist, not to be correct — nothing
+      # here connects to a console or a database.
+      - name: Build
+        run: npm run build
+        env:
+          UNIFI_HOST: 192.168.1.1
+          UNIFI_USER: ci
+          UNIFI_PASS: ci
+          CLICKHOUSE_URL: http://127.0.0.1:8123
+          CLICKHOUSE_DB: unifi_aq
+          CLICKHOUSE_USER: ci
+          CLICKHOUSE_PASSWORD: ci
+          APP_SECRET: ci-not-a-real-secret
+          COLLECTOR_ENABLED: "false"
