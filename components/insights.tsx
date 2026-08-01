@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, Wind } from "lucide-react";
 
-import { METRICS, METRIC_BY_KEY, formatValue, type MetricKey } from "@/lib/metrics";
+import {
+  METRICS, METRIC_BY_KEY, formatValue, type MetricDef, type MetricKey,
+} from "@/lib/metrics";
 import { cn } from "@/lib/utils";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -15,23 +17,69 @@ type HeatCell = { dow: number; hour: number; value: number | null; samples: numb
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 /**
- * Sequential ramp, dark → light.
+ * Green → red, following the EPA AQI convention (good / moderate / unhealthy).
  *
- * The usual light→dark direction is wrong on a dark surface: it would make the
- * highest readings the ones that vanish into the background. Reversed, low
- * values recede toward the panel and high values glow — magnitude reads as
- * brightness, which is what the eye actually picks up here.
+ * Caveat worth knowing: red-green is the single worst pairing for colour-vision
+ * deficiency. It is used here because it is the domain's own standard and reads
+ * instantly to most people — but colour is never the only channel. Every cell
+ * carries its value on hover, the scale is labelled at both ends, and the table
+ * view shows the same numbers with no colour at all.
  */
-const RAMP = ["#12233b", "#164070", "#1c5cab", "#2a78d6", "#5598e7", "#86b6ef", "#cde2fb"];
+const RAMP = ["#1a7f37", "#4caf50", "#a3c644", "#f7c948", "#f59e0b", "#ef6c3a", "#d03b3b"];
 
-function rampColor(t: number): string {
-  const i = Math.min(RAMP.length - 1, Math.max(0, Math.round(t * (RAMP.length - 1))));
-  return RAMP[i];
+/** Shown when a metric has no published bands to anchor against. */
+const NEUTRAL_RAMP = ["#12233b", "#164070", "#1c5cab", "#2a78d6", "#5598e7", "#86b6ef", "#cde2fb"];
+
+function pick(ramp: string[], t: number): string {
+  const i = Math.min(ramp.length - 1, Math.max(0, Math.round(t * (ramp.length - 1))));
+  return ramp[i];
+}
+
+/**
+ * Maps a reading onto the ramp using the metric's own thresholds rather than
+ * the window's min and max.
+ *
+ * This matters once colour carries meaning. Scaling to the observed range would
+ * paint the busiest hour red even on a day when every reading was comfortably
+ * Good — the map would look alarming and mean nothing. Anchoring to the
+ * published bands keeps green as "actually fine" and reserves red for readings
+ * that have genuinely earned it.
+ *
+ * Returns null when the metric has no bands, so the caller can fall back to a
+ * neutral ramp instead of implying a verdict it cannot support.
+ */
+function absoluteT(value: number, m: MetricDef): number | null {
+  const t = m.thresholds;
+  if (!t) return null;
+
+  if (t.kind === "rising") {
+    // Anchor points: a sensible floor, then each band edge.
+    const anchors = [m.min ?? 0, ...t.steps.map((s) => s.upTo)];
+    if (value <= anchors[0]) return 0;
+    for (let i = 1; i < anchors.length; i++) {
+      if (value <= anchors[i]) {
+        const within = (value - anchors[i - 1]) / (anchors[i] - anchors[i - 1] || 1);
+        return Math.min(1, (i - 1 + within) / anchors.length);
+      }
+    }
+    return 1;
+  }
+
+  // Comfort band: green inside it, warming with distance in either direction.
+  const [goodLo, goodHi] = t.good;
+  const [fairLo, fairHi] = t.fair;
+  if (value >= goodLo && value <= goodHi) return 0.08;
+  const over = value > goodHi ? value - goodHi : goodLo - value;
+  const slack = value > goodHi ? Math.max(1, fairHi - goodHi) : Math.max(1, goodLo - fairLo);
+  return Math.min(1, 0.3 + (over / slack) * 0.45);
 }
 
 export function Heatmap({ sensor }: { sensor: string | null }) {
   const [metric, setMetric] = useState<MetricKey>("co2");
   const [days, setDays] = useState(14);
+  // Absolute answers "was the air bad?"; relative answers "when does it peak?".
+  // They are different questions and one scale cannot serve both.
+  const [scale, setScale] = useState<"absolute" | "relative">("absolute");
   const [cells, setCells] = useState<HeatCell[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -64,6 +112,8 @@ export function Heatmap({ sensor }: { sensor: string | null }) {
 
   const def = METRIC_BY_KEY[metric];
   const span = hi - lo || 1;
+  // Colour only carries a verdict when the metric has bands AND we asked for one.
+  const graded = Boolean(def.thresholds) && scale === "absolute";
 
   return (
     <figure className="panel min-w-0 p-4">
@@ -86,6 +136,16 @@ export function Heatmap({ sensor }: { sensor: string | null }) {
                 {m.label}
               </option>
             ))}
+          </select>
+          <select
+            value={scale}
+            onChange={(e) => setScale(e.target.value as "absolute" | "relative")}
+            className="h-7 rounded-md border border-(--hairline) bg-(--surface-panel) px-1.5 text-[11px] outline-none focus:border-white/25"
+            aria-label="Colour scale"
+            title="Absolute grades against health thresholds; relative stretches colour across this window to expose the pattern"
+          >
+            <option value="absolute">Absolute</option>
+            <option value="relative">Relative</option>
           </select>
           <select
             value={days}
@@ -140,7 +200,11 @@ export function Heatmap({ sensor }: { sensor: string | null }) {
                       className="h-5 flex-1 rounded-[2px]"
                       style={{
                         background:
-                          v === null ? "rgba(255,255,255,0.03)" : rampColor((v - lo) / span),
+                          v === null
+                            ? "rgba(255,255,255,0.03)"
+                            : graded
+                              ? pick(RAMP, absoluteT(v, def)!)
+                              : pick(NEUTRAL_RAMP, (v - lo) / span),
                       }}
                     />
                   );
@@ -150,18 +214,34 @@ export function Heatmap({ sensor }: { sensor: string | null }) {
 
             {/* scale */}
             <div className="mt-3 flex items-center gap-2 pl-9">
-              <span className="figure text-[10px] text-muted-foreground">
-                {formatValue(lo, def)}
+              <span className="text-[10px] text-muted-foreground">
+                {graded ? "Good" : formatValue(lo, def)}
               </span>
               <div className="flex h-2 flex-1 overflow-hidden rounded-sm">
-                {RAMP.map((c) => (
+                {(graded ? RAMP : NEUTRAL_RAMP).map((c) => (
                   <div key={c} className="flex-1" style={{ background: c }} />
                 ))}
               </div>
-              <span className="figure text-[10px] text-muted-foreground">
-                {formatValue(hi, def)} {def.unit}
+              <span className="text-[10px] text-muted-foreground">
+                {graded ? "Severe" : `${formatValue(hi, def)} ${def.unit}`}
               </span>
             </div>
+            <p className="mt-1.5 pl-9 text-[10px] text-muted-foreground/60">
+              {graded ? (
+                <>
+                  Graded against {def.source} — an all-green map means the air really was fine.
+                  Observed {formatValue(lo, def)}–{formatValue(hi, def)} {def.unit}. Switch to
+                  Relative to stretch the colour across this range and see the pattern.
+                </>
+              ) : def.thresholds ? (
+                <>
+                  Stretched across {formatValue(lo, def)}–{formatValue(hi, def)} {def.unit} to show
+                  the pattern. Colour is relative intensity here, not a health verdict.
+                </>
+              ) : (
+                <>No published bands for {def.label}, so colour shows relative range only.</>
+              )}
+            </p>
           </div>
         </div>
       )}
