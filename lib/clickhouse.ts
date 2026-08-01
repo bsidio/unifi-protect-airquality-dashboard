@@ -158,6 +158,253 @@ function forwardFill(rows: SeriesPoint[], metrics: string[]): SeriesPoint[] {
   return rows;
 }
 
+export type MetricStats = {
+  metric: string;
+  min: number;
+  max: number;
+  avg: number;
+  p50: number;
+  p95: number;
+  samples: number;
+  /** Seconds spent above this metric's "elevated" threshold, duration-weighted. */
+  seconds_above: number;
+  /** Total seconds covered, so the caller can render a percentage. */
+  seconds_total: number;
+};
+
+/**
+ * Exact statistics over the raw rows — not the bucketed series.
+ *
+ * Time-above-threshold is duration-weighted rather than counted. The collector
+ * only writes when a value changes, so a reading holds until the next one; a
+ * plain count of rows would over-weight whichever metric happens to churn most.
+ */
+export async function stats(opts: {
+  sensorId: string;
+  fromMs: number;
+  toMs: number;
+  /** metric -> threshold. Metrics without one still get min/max/avg. */
+  thresholds: Record<string, number>;
+}): Promise<MetricStats[]> {
+  const entries = Object.entries(opts.thresholds).filter(([m]) =>
+    METRIC_KEYS.includes(m as never),
+  );
+  // Build a metric -> threshold expression; NULL means "no band to compare".
+  const thresholdExpr = entries.length
+    ? `multiIf(${entries.map(([m, v]) => `metric = '${m}', ${Number(v)}`).join(", ")}, NULL)`
+    : "NULL";
+
+  const rs = await ch().query({
+    query: `
+      WITH spans AS (
+        SELECT
+          metric,
+          value,
+          dateDiff(
+            'second',
+            ts,
+            leadInFrame(ts, 1, fromUnixTimestamp64Milli({to:Int64}))
+              OVER (PARTITION BY metric ORDER BY ts
+                    ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING)
+          ) AS held_for
+        FROM ${TABLE}
+        WHERE sensor_id = {sensor:String}
+          AND ts >= fromUnixTimestamp64Milli({from:Int64})
+          AND ts <= fromUnixTimestamp64Milli({to:Int64})
+      )
+      SELECT metric,
+             min(value)                                   AS min,
+             max(value)                                   AS max,
+             avg(value)                                   AS avg,
+             quantile(0.5)(value)                         AS p50,
+             quantile(0.95)(value)                        AS p95,
+             count()                                      AS samples,
+             sumIf(held_for, value > ${thresholdExpr})    AS seconds_above,
+             sum(held_for)                                AS seconds_total
+      FROM spans
+      GROUP BY metric`,
+    query_params: { sensor: opts.sensorId, from: opts.fromMs, to: opts.toMs },
+    format: "JSONEachRow",
+  });
+
+  return (await rs.json<Record<string, unknown>>()).map((r) => ({
+    metric: String(r.metric),
+    min: Number(r.min),
+    max: Number(r.max),
+    avg: Number(r.avg),
+    p50: Number(r.p50),
+    p95: Number(r.p95),
+    samples: Number(r.samples),
+    seconds_above: Number(r.seconds_above ?? 0),
+    seconds_total: Number(r.seconds_total ?? 0),
+  }));
+}
+
+export type HeatCell = { dow: number; hour: number; value: number | null; samples: number };
+
+/**
+ * Average by weekday × hour — the view that shows a room's daily rhythm, which
+ * no amount of scrolling a line chart will reveal.
+ */
+export async function heatmap(opts: {
+  sensorId: string;
+  metric: string;
+  fromMs: number;
+  toMs: number;
+}): Promise<HeatCell[]> {
+  if (!METRIC_KEYS.includes(opts.metric as never)) return [];
+  const rs = await ch().query({
+    query: `
+      SELECT toDayOfWeek(ts) - 1 AS dow,   -- 0 = Monday
+             toHour(ts)          AS hour,
+             avg(value)          AS value,
+             count()             AS samples
+      FROM ${TABLE}
+      WHERE sensor_id = {sensor:String}
+        AND metric = {metric:String}
+        AND ts >= fromUnixTimestamp64Milli({from:Int64})
+        AND ts <= fromUnixTimestamp64Milli({to:Int64})
+      GROUP BY dow, hour
+      ORDER BY dow, hour`,
+    query_params: {
+      sensor: opts.sensorId,
+      metric: opts.metric,
+      from: opts.fromMs,
+      to: opts.toMs,
+    },
+    format: "JSONEachRow",
+  });
+  return (await rs.json<Record<string, unknown>>()).map((r) => ({
+    dow: Number(r.dow),
+    hour: Number(r.hour),
+    value: r.value === null ? null : Number(r.value),
+    samples: Number(r.samples),
+  }));
+}
+
+export type DecayEvent = {
+  start: string;
+  end: string;
+  from_ppm: number;
+  to_ppm: number;
+  minutes: number;
+  /** Air changes per hour implied by this decay. */
+  ach: number;
+};
+
+/**
+ * Estimates ventilation from CO₂ decay.
+ *
+ * Once a room empties, CO₂ falls toward outdoor concentration exponentially:
+ *   C(t) = C_out + (C_0 - C_out)·e^(-n·t)
+ * so n — air changes per hour — is the slope of ln(C - C_out) against time.
+ * We take sustained falling stretches and solve for n over each.
+ *
+ * This is an estimate: it assumes no occupants generating CO₂ during the decay
+ * and a well-mixed room. Short or shallow declines are discarded because they
+ * are dominated by sensor noise rather than air exchange.
+ */
+export async function ventilation(opts: {
+  sensorId: string;
+  fromMs: number;
+  toMs: number;
+  outdoorPpm?: number;
+}): Promise<DecayEvent[]> {
+  const outdoor = opts.outdoorPpm ?? 420;
+
+  const rs = await ch().query({
+    query: `
+      WITH minutes AS (
+        SELECT toStartOfMinute(ts) AS m, avg(value) AS co2
+        FROM ${TABLE}
+        WHERE sensor_id = {sensor:String} AND metric = 'co2'
+          AND ts >= fromUnixTimestamp64Milli({from:Int64})
+          AND ts <= fromUnixTimestamp64Milli({to:Int64})
+        GROUP BY m
+        ORDER BY m
+      ),
+      diffed AS (
+        -- Mark the start of a new run wherever the series stops falling.
+        SELECT m, co2,
+               if(co2 <= lagInFrame(co2, 1, 1e9) OVER (ORDER BY m), 0, 1) AS is_break
+        FROM minutes
+      ),
+      marked AS (
+        -- Cumulative sum of those marks groups each falling stretch together.
+        -- (ClickHouse forbids nesting one window function inside another's
+        -- argument, hence the separate CTE.)
+        SELECT m, co2,
+               sum(is_break) OVER (ORDER BY m ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS run
+        FROM diffed
+      )
+      SELECT min(m)                                        AS start,
+             max(m)                                        AS end,
+             argMin(co2, m)                                AS from_ppm,
+             argMax(co2, m)                                 AS to_ppm,
+             dateDiff('minute', min(m), max(m))            AS minutes
+      FROM marked
+      GROUP BY run
+      HAVING minutes >= 20
+         AND from_ppm - to_ppm >= 40
+         AND to_ppm > {outdoor:Float64} + 20
+      ORDER BY start DESC
+      LIMIT 20`,
+    query_params: {
+      sensor: opts.sensorId,
+      from: opts.fromMs,
+      to: opts.toMs,
+      outdoor,
+    },
+    format: "JSONEachRow",
+  });
+
+  return (await rs.json<Record<string, unknown>>())
+    .map((r) => {
+      const from = Number(r.from_ppm);
+      const to = Number(r.to_ppm);
+      const minutes = Number(r.minutes);
+      // n = ln((C0 - Cout) / (C1 - Cout)) / hours
+      const ach = (Math.log((from - outdoor) / (to - outdoor)) / minutes) * 60;
+      return {
+        start: String(r.start),
+        end: String(r.end),
+        from_ppm: from,
+        to_ppm: to,
+        minutes,
+        ach: Number(ach.toFixed(3)),
+      };
+    })
+    .filter((e) => Number.isFinite(e.ach) && e.ach > 0);
+}
+
+/** Raw rows for the window, streamed out as CSV. */
+export async function exportCsv(opts: {
+  sensorId: string;
+  metrics: string[];
+  fromMs: number;
+  toMs: number;
+}): Promise<string> {
+  const metrics = opts.metrics.filter((m) => METRIC_KEYS.includes(m as never));
+  const rs = await ch().query({
+    query: `
+      SELECT ts, sensor_id, sensor_name, metric, value, status
+      FROM ${TABLE}
+      WHERE sensor_id = {sensor:String}
+        AND ts >= fromUnixTimestamp64Milli({from:Int64})
+        AND ts <= fromUnixTimestamp64Milli({to:Int64})
+        ${metrics.length ? "AND metric IN {metrics:Array(String)}" : ""}
+      ORDER BY ts`,
+    query_params: {
+      sensor: opts.sensorId,
+      from: opts.fromMs,
+      to: opts.toMs,
+      ...(metrics.length ? { metrics } : {}),
+    },
+    format: "CSVWithNames",
+  });
+  return rs.text();
+}
+
 export type ChHealth = {
   ok: boolean;
   error?: string;

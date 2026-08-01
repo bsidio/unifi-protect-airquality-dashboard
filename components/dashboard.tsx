@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Activity, AlertTriangle, CalendarRange, GripVertical, Loader2, LogOut, RefreshCw, RotateCcw,
-  Table2, Wind,
+  Activity, AlertTriangle, CalendarRange, Download, GripVertical, Loader2, LogOut,
+  RefreshCw, RotateCcw, Table2, Wind,
 } from "lucide-react";
 
 import {
@@ -27,6 +27,7 @@ import {
   type MetricGroup,
   type MetricKey,
 } from "@/lib/metrics";
+import { Heatmap, VentilationCard } from "@/components/insights";
 import { usePersistentState } from "@/lib/use-persistent-state";
 import { cn } from "@/lib/utils";
 
@@ -36,6 +37,17 @@ type Device = {
   last_seen: string;
   points: number;
   live?: boolean;
+};
+
+type MetricStat = {
+  metric: string;
+  min: number;
+  max: number;
+  avg: number;
+  p50: number;
+  p95: number;
+  seconds_above: number;
+  seconds_total: number;
 };
 
 type Reading = {
@@ -70,9 +82,11 @@ type CompareId = (typeof COMPARE)[number]["id"];
 /** Headline figures, in reading order. */
 const HERO: MetricKey[] = ["aqi", "co2", "pm2p5", "voc"];
 
-/** The particulate stack is a widget like any other, with a reserved id. */
+/** Non-metric widgets are ordinary draggable cards with reserved ids. */
 const STACK_ID = "__stack";
-const DEFAULT_ORDER: string[] = [STACK_ID, ...DEFAULT_METRICS];
+const HEATMAP_ID = "__heatmap";
+const VENT_ID = "__ventilation";
+const DEFAULT_ORDER: string[] = [STACK_ID, HEATMAP_ID, VENT_ID, ...DEFAULT_METRICS];
 
 const TONE_CLASS: Record<string, string> = {
   good: "text-(--status-good)",
@@ -104,6 +118,8 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
   const [customTo, setCustomTo] = usePersistentState<string>("to", "");
   const [selected, setSelected] = usePersistentState<MetricKey[]>("metrics", DEFAULT_METRICS);
   const [showStack, setShowStack] = usePersistentState<boolean>("stack", true);
+  const [showHeatmap, setShowHeatmap] = usePersistentState<boolean>("heatmap", true);
+  const [showVent, setShowVent] = usePersistentState<boolean>("vent", true);
   const [showTable, setShowTable] = usePersistentState<boolean>("table", false);
   const [compare, setCompare] = usePersistentState<CompareId>("compare", "off");
   const [order, setOrder, orderMeta] = usePersistentState<string[]>("order", DEFAULT_ORDER);
@@ -111,6 +127,7 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
   const [points, setPoints] = useState<SeriesPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [seriesError, setSeriesError] = useState<string | null>(null);
+  const [stats, setStats] = useState<Record<string, MetricStat>>({});
   const [dragging, setDragging] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
 
@@ -199,6 +216,25 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
 
       setPoints(merged);
       setSeriesError(null);
+
+      // Exact statistics come from the raw rows, not these buckets — an average
+      // of averages would be wrong, and p95 doubly so.
+      const sq = new URLSearchParams({ sensor });
+      const win = mode === "custom" ? absoluteRange(customFrom, customTo) : null;
+      if (win) {
+        sq.set("from", String(win.from));
+        sq.set("to", String(win.to));
+      } else {
+        sq.set("range", String(rangeMin));
+      }
+      fetch(`/api/stats?${sq}`, { cache: "no-store" })
+        .then((r) => r.json())
+        .then((j) =>
+          setStats(
+            Object.fromEntries(((j.stats ?? []) as MetricStat[]).map((x) => [x.metric, x])),
+          ),
+        )
+        .catch(() => setStats({}));
     } catch (e) {
       setSeriesError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -224,11 +260,16 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
 
   /** Visible widgets, in the user's saved order; anything new lands at the end. */
   const widgets = useMemo(() => {
-    const visible = new Set<string>([...selected, ...(showStack ? [STACK_ID] : [])]);
+    const visible = new Set<string>([
+      ...selected,
+      ...(showStack ? [STACK_ID] : []),
+      ...(showHeatmap ? [HEATMAP_ID] : []),
+      ...(showVent ? [VENT_ID] : []),
+    ]);
     const ordered = order.filter((id) => visible.has(id));
     const missing = [...visible].filter((id) => !order.includes(id));
     return [...ordered, ...missing];
-  }, [order, selected, showStack]);
+  }, [order, selected, showStack, showHeatmap, showVent]);
 
   function reorder(from: string, to: string) {
     if (from === to) return;
@@ -240,6 +281,20 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
     // Preserve hidden widgets' relative order by appending them back.
     const hidden = order.filter((id) => !base.includes(id));
     setOrder([...base, ...hidden]);
+  }
+
+  /** Downloads the raw rows behind the current window, not the bucketed series. */
+  function exportCsv() {
+    if (!sensor) return;
+    const q = new URLSearchParams({ sensor, metrics: [...selected, ...PM_METRICS].join(",") });
+    const win = mode === "custom" ? absoluteRange(customFrom, customTo) : null;
+    if (win) {
+      q.set("from", String(win.from));
+      q.set("to", String(win.to));
+    } else {
+      q.set("range", String(rangeMin));
+    }
+    window.location.href = `/api/export?${q}`;
   }
 
   const device = devices.find((d) => d.sensor_id === sensor);
@@ -478,7 +533,26 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
             ))}
           </div>
 
+          <div className="flex items-center gap-1.5">
+            <span className="micro text-muted-foreground/50">Insights</span>
+            <Chip on={showHeatmap} onClick={() => setShowHeatmap(!showHeatmap)}
+              title="Average by hour and weekday">
+              Rhythm
+            </Chip>
+            <Chip on={showVent} onClick={() => setShowVent(!showVent)}
+              title="Air changes per hour, inferred from CO₂ decay">
+              Ventilation
+            </Chip>
+          </div>
+
           <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={exportCsv}
+              className="inline-flex items-center gap-1.5 rounded-md border border-(--hairline) px-2.5 py-1.5 text-[11px] text-muted-foreground transition hover:bg-white/5 hover:text-foreground"
+              title="Download the raw readings for this window"
+            >
+              <Download className="size-3.5" /> CSV
+            </button>
             {layoutDirty && (
               <button
                 onClick={orderMeta.reset}
@@ -516,9 +590,54 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
             <section className="grid gap-3 xl:grid-cols-2">
               {widgets.map((id) => {
                 const isStack = id === STACK_ID;
-                const m = isStack ? null : METRIC_BY_KEY[id];
-                if (!isStack && !m) return null;
+                const isInsight = id === HEATMAP_ID || id === VENT_ID;
+                const m = isStack || isInsight ? null : METRIC_BY_KEY[id];
+                if (!isStack && !isInsight && !m) return null;
                 const s = m ? reading?.metrics?.[m.key] : undefined;
+
+                // The insight cards render their own panel, so they only need
+                // the drag wrapper around them.
+                if (isInsight) {
+                  return (
+                    <div
+                      key={id}
+                      draggable
+                      onDragStart={(e) => {
+                        setDragging(id);
+                        e.dataTransfer.effectAllowed = "move";
+                        e.dataTransfer.setData("text/plain", id);
+                      }}
+                      onDragEnd={() => {
+                        setDragging(null);
+                        setDragOver(null);
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        if (dragOver !== id) setDragOver(id);
+                      }}
+                      onDragLeave={() => setDragOver((cur) => (cur === id ? null : cur))}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const from = e.dataTransfer.getData("text/plain") || dragging;
+                        if (from) reorder(from, id);
+                        setDragging(null);
+                        setDragOver(null);
+                      }}
+                      className={cn(
+                        "min-w-0 transition",
+                        id === HEATMAP_ID && "xl:col-span-2",
+                        dragging === id && "opacity-40",
+                        dragOver === id && dragging !== id && "rounded-xl ring-1 ring-white/20",
+                      )}
+                    >
+                      {id === HEATMAP_ID ? (
+                        <Heatmap sensor={sensor} />
+                      ) : (
+                        <VentilationCard sensor={sensor} />
+                      )}
+                    </div>
+                  );
+                }
 
                 return (
                   <figure
@@ -547,7 +666,10 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
                       setDragOver(null);
                     }}
                     className={cn(
-                      "panel group p-4 transition",
+                      // min-w-0: without it this grid item cannot shrink below
+                      // the chart canvas's own width and the page scrolls
+                      // sideways on a phone.
+                      "panel group min-w-0 p-4 transition",
                       isStack && "xl:col-span-2",
                       dragging === id && "opacity-40",
                       dragOver === id && dragging !== id && "border-white/30 ring-1 ring-white/20",
@@ -603,6 +725,8 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
                         </span>
                       </div>
                     </figcaption>
+
+                    {!isStack && stats[m!.key] && <StatStrip stat={stats[m!.key]} metricKey={m!.key} />}
 
                     {isStack ? (
                       <StackedParticulateChart points={points} />
@@ -909,6 +1033,37 @@ function TableView({ points }: { points: SeriesPoint[] }) {
             </PageButton>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/** Exact window statistics, computed on raw rows rather than chart buckets. */
+function StatStrip({ stat, metricKey }: { stat: MetricStat; metricKey: string }) {
+  const m = METRIC_BY_KEY[metricKey];
+  const pct = stat.seconds_total > 0 ? (100 * stat.seconds_above) / stat.seconds_total : 0;
+  const cell = (label: string, value: number) => (
+    <span className="whitespace-nowrap">
+      <span className="text-muted-foreground/50">{label}</span>{" "}
+      <span className="figure text-muted-foreground">{formatValue(value, m)}</span>
+    </span>
+  );
+  return (
+    <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-y border-(--hairline)/50 py-1.5 text-[10px]">
+      {cell("min", stat.min)}
+      {cell("avg", stat.avg)}
+      {cell("p95", stat.p95)}
+      {cell("max", stat.max)}
+      {m.thresholds && (
+        <span
+          className="ml-auto whitespace-nowrap"
+          title="Share of the window spent above this metric's first elevated band, weighted by how long each reading held"
+        >
+          <span className="text-muted-foreground/50">elevated</span>{" "}
+          <span className={cn("figure", pct > 0 ? "text-(--status-warning)" : "text-muted-foreground")}>
+            {pct < 0.05 ? "0" : pct.toFixed(1)}%
+          </span>
+        </span>
       )}
     </div>
   );

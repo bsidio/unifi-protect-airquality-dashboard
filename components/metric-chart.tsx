@@ -121,7 +121,7 @@ export function MetricChart({
       config={config}
       xDataKey="label"
       curveType="linear"
-      className={hasPrev ? "h-[210px] w-full" : "h-[190px] w-full"}
+      className={hasPrev ? "h-[210px] w-full min-w-0" : "h-[190px] w-full min-w-0"}
     >
       <EChartsAreaChart.Grid />
       <EChartsAreaChart.XAxis
@@ -215,7 +215,7 @@ export function StackedParticulateChart({ points }: { points: SeriesPoint[] }) {
       curveType="linear"
       stackType="stacked"
       enableHoverHighlight
-      className="h-[260px] w-full"
+      className="h-[260px] w-full min-w-0"
     >
       <EChartsAreaChart.Grid />
       <EChartsAreaChart.XAxis
