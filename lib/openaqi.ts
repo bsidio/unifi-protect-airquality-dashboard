@@ -173,13 +173,29 @@ export async function flushToOpenaqi(): Promise<void> {
       signal: AbortSignal.timeout(30_000),
     });
 
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
       // Will not fix itself. Halting beats retrying every five seconds and
       // burying the message that says what is wrong.
       s.status.halted =
         "openaqi rejected the API key. Check OPENAQI_KEY, or issue a new one at https://openaqi.net/account";
       s.status.lastError = s.status.halted;
       return;
+    }
+
+    if (res.status === 403) {
+      // NOT a key problem, however much it looks like one. openaqi's ingest
+      // service answers 401 for every authentication failure and never 403, so
+      // a 403 came from something in front of it — Cloudflare blocking the
+      // request by client signature is the observed case, and it is transient
+      // and outside our control.
+      //
+      // Halting here, as this used to, converted a temporary edge decision into
+      // a permanent stop that needed a restart to clear, and reported it as a
+      // bad API key so the reader went and rotated a key that was fine. Retry
+      // with the normal backoff instead.
+      throw new Error(
+        "openaqi returned HTTP 403 — blocked before reaching the service, not an API key problem",
+      );
     }
 
     if (res.status >= 500 || res.status === 429) {
