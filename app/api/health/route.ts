@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { collectorStatus, latestReadings, startCollector } from "@/lib/collector";
 import { health as chHealth } from "@/lib/clickhouse";
 import { configIssues, env } from "@/lib/env";
+import { forwarderStatus } from "@/lib/openaqi";
 import { ProtectClient } from "@/lib/protect";
 
 export const dynamic = "force-dynamic";
@@ -85,6 +86,8 @@ export async function GET() {
     clickhouse,
     protect,
     collector: collectorStatus(),
+    // Counters and the last error only — never the key, and never a reading.
+    openaqi: forwarderStatus(),
     auth: { enabled: env.auth.enabled },
   });
 }

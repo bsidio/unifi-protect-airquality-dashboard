@@ -55,6 +55,28 @@ export const env = {
       dedupe: bool("COLLECTOR_DEDUPE", true),
     };
   },
+  /**
+   * Optional contribution of this sensor's readings to openaqi.net, the public
+   * crowdsourced air quality map.
+   *
+   * One switch: set OPENAQI_KEY and readings are forwarded. There is no
+   * separate enable flag, because a key and a flag is two things to get right
+   * and the second one only exists to be forgotten.
+   *
+   * Off unless a key is present, deliberately — sending somebody's readings to
+   * a third party is not a sensible default, however public the destination.
+   */
+  get openaqi() {
+    const key = str("OPENAQI_KEY");
+    return {
+      key,
+      enabled: Boolean(key),
+      server: str("OPENAQI_SERVER", "https://ingest.openaqi.net").replace(/\/+$/, ""),
+      /** Log the exact payload and send nothing, for anyone who would rather
+       *  see what leaves the machine than take our word for it. */
+      dryRun: bool("OPENAQI_DRY_RUN", false),
+    };
+  },
 };
 
 /** Config problems worth showing the operator before anything else. */
