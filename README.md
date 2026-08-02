@@ -188,6 +188,50 @@ python3 tools/server.py          # minimal local dashboard, no ClickHouse
 
 It reads the same root `.env`.
 
+## Contribute to openaqi (optional)
+
+Your sensor is measuring air quality in a place official monitoring almost
+certainly does not cover — often the nearest reference station is the only one
+for the whole city. [openaqi.net](https://openaqi.net) is a free public map
+built from readings like these.
+
+Set one variable and this dashboard forwards its readings there once a minute:
+
+```bash
+# Register a station at https://openaqi.net/account — approximate
+# coordinates are fine, and they are never published.
+OPENAQI_KEY=oaq_your_station_key
+```
+
+That is the whole integration. No key, no forwarding.
+
+**What is sent.** Timestamps, metric names and numbers. Nothing else.
+
+```json
+{ "readings": [ { "ts": "2026-08-02T20:03:25.185Z", "metric": "pm2p5", "value": 9.1 } ] }
+```
+
+Not your coordinates — openaqi resolves location from the station you
+registered, server-side, to an area of about 5 km². Not your sensor's name
+either: this dashboard knows it as "Bedroom"; openaqi never learns that. Its
+readings table has no column for either.
+
+Check rather than trust:
+
+```bash
+OPENAQI_DRY_RUN=true   # logs the exact payload and sends nothing
+```
+
+**What it will not do.** Forwarding runs on its own timer with its own buffer,
+so openaqi being slow, down or misconfigured cannot delay or lose a local
+write — your ClickHouse is always written first. A network failure keeps the
+readings and retries with backoff. A rejected key stops immediately with a
+message rather than retrying forever, and `vape` is filtered out because
+openaqi's catalogue does not include it.
+
+Status appears in `/api/health` under `openaqi` — counters and the last error,
+never the key.
+
 ## Contributing
 
 Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).

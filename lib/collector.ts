@@ -5,6 +5,7 @@ import { EventEmitter } from "node:events";
 import { ensureSchema, insertReadings, type Row } from "./clickhouse";
 import { env } from "./env";
 import { METRIC_KEYS } from "./metrics";
+import { forward, startForwarder, stopForwarder } from "./openaqi";
 import { ProtectClient, type Reading } from "./protect";
 
 /**
@@ -146,6 +147,10 @@ export async function startCollector(): Promise<void> {
   s.controller = new AbortController();
   s.timer = setInterval(() => void flush(), env.collector.flushMs);
 
+  // Optional, off unless configured. Runs on its own timer with its own buffer,
+  // so openaqi being slow or down cannot delay or lose a local write.
+  startForwarder();
+
   const client = new ProtectClient({ host, username: user, password: pass, verifySsl });
 
   void client
@@ -155,6 +160,9 @@ export async function startCollector(): Promise<void> {
         s.status.lastReadingAt = reading.ts;
         s.latest.set(reading.sensorId, reading);
         s.buffer.push(...toRows(reading));
+        // Queued, never awaited: contributing must not be able to slow down
+        // the local path that everything else depends on.
+        forward(reading);
         s.bus.emit("reading", reading);
       },
       {
@@ -179,6 +187,7 @@ export async function stopCollector(): Promise<void> {
   s.controller?.abort();
   if (s.timer) clearInterval(s.timer);
   s.timer = null;
+  stopForwarder();
   await flush();
   s.status.running = false;
   s.status.connected = false;
