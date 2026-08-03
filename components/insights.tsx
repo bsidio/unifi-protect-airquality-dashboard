@@ -6,7 +6,7 @@ import { Loader2, Wind } from "lucide-react";
 import {
   METRICS, METRIC_BY_KEY, formatValue, type MetricDef, type MetricKey,
 } from "@/lib/metrics";
-import { cn } from "@/lib/utils";
+import { cn, parseStoreTs } from "@/lib/utils";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Heatmap
@@ -347,7 +347,7 @@ export function VentilationCard({ sensor }: { sensor: string | null }) {
                 className="flex items-center justify-between gap-3 border-t border-(--hairline)/50 pt-1 text-[11px]"
               >
                 <span className="figure text-muted-foreground">
-                  {new Date(e.start.replace(" ", "T") + "Z").toLocaleString([], {
+                  {new Date(parseStoreTs(e.start)).toLocaleString([], {
                     month: "short",
                     day: "numeric",
                     hour: "2-digit",

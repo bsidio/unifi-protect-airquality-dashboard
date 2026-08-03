@@ -1,4 +1,4 @@
-import { exportCsv } from "@/lib/clickhouse";
+import { exportCsv } from "@/lib/store";
 import { METRIC_KEYS } from "@/lib/metrics";
 
 export const dynamic = "force-dynamic";
@@ -14,12 +14,14 @@ export async function GET(req: Request) {
   const metrics = (q.get("metrics") ?? METRIC_KEYS.join(",")).split(",").filter(Boolean);
 
   try {
-    const csv = await exportCsv({ sensorId: sensor, metrics, fromMs, toMs });
+    const { csv, provenance } = await exportCsv({ sensorId: sensor, metrics, fromMs, toMs });
     const stamp = new Date(toMs).toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    // A download has nowhere to render a warning, so the filename carries it.
+    const suffix = provenance.truncated ? "-partial" : "";
     return new Response(csv, {
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="air-quality-${stamp}.csv"`,
+        "Content-Disposition": `attachment; filename="air-quality-${stamp}${suffix}.csv"`,
         "Cache-Control": "no-store",
       },
     });

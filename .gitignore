@@ -9,5 +9,5 @@ next-env.d.ts
 .gstack/
 tsconfig.tsbuildinfo
 
-# Plaintext Kubernetes secrets — never commit
+# Plaintext Kubernetes secrets (never commit) — the .enc.yaml is safe
 secrets.secret.yaml

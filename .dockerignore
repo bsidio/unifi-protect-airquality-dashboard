@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+.github
+.env
+.env.local
+.gstack
+docs
+tools
+*.md
+tsconfig.tsbuildinfo
+!app/fonts/OFL.md

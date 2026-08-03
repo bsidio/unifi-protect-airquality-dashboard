@@ -265,3 +265,18 @@ export function gradeReading(
     sourced: "unifi",
   };
 }
+
+/**
+ * Metrics openaqi will not store.
+ *
+ * `vape` is a UniFi-specific index with no published health meaning and no
+ * equivalent on other hardware, so openaqi's catalogue has no column for it.
+ * Sending it would earn a rejection on every batch forever; charting it from a
+ * remote store would draw an empty panel.
+ *
+ * Defined here, next to the metrics themselves, because three places need to
+ * agree about it — the forwarder that filters it out, the remote store that
+ * cannot fetch it, and the UI that has to explain why. Three copies of a list
+ * is three chances for one of them to be wrong.
+ */
+export const OPENAQI_UNSUPPORTED: string[] = ["vape"];

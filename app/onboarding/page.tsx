@@ -10,7 +10,20 @@ import { cn } from "@/lib/utils";
 
 type Health = {
   issues: string[];
-  clickhouse: { ok: boolean; error?: string; version?: string; rows?: number };
+  store: {
+    mode: "clickhouse" | "openaqi" | "both";
+    backend: "clickhouse" | "openaqi";
+    ok: boolean;
+    error?: string;
+    version?: string;
+    rows?: number;
+    station?: { id: string; name: string; firstReading?: string | null };
+    remote?: { station: string; readings: number; lastReading: string | null };
+  };
+  openaqi: {
+    enabled: boolean; dryRun: boolean; sent: number; rejected: number;
+    pending: number; lastError: string | null; halted: string | null;
+  };
   protect: { ok: boolean; error?: string; sensors?: { id: string; name: string; firmware: string }[] };
   collector: {
     running: boolean; connected: boolean; error: string | null;
@@ -41,10 +54,12 @@ export default function OnboardingPage() {
   }, [load]);
 
   const envOk = (health?.issues.length ?? 1) === 0;
-  const chOk = health?.clickhouse.ok ?? false;
+  const storeOk = health?.store.ok ?? false;
+  const mode = health?.store.mode ?? "clickhouse";
+  const remote = health?.store.backend === "openaqi";
   const upOk = health?.protect.ok ?? false;
   const flowing = (health?.collector.written ?? 0) > 0 || (health?.collector.received ?? 0) > 0;
-  const ready = envOk && chOk && upOk;
+  const ready = envOk && storeOk && upOk;
 
   return (
     <main className="mx-auto min-h-screen max-w-3xl px-5 py-12">
@@ -57,6 +72,16 @@ export default function OnboardingPage() {
           <p className="text-sm text-muted-foreground">
             Everything is configured in <code className="rounded bg-muted px-1">.env</code>. This page
             checks each piece and refreshes itself.
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Storage:{" "}
+            <span className="font-medium text-foreground">
+              {mode === "openaqi"
+                ? "openaqi — no local database"
+                : mode === "both"
+                  ? "ClickHouse, also forwarding to openaqi"
+                  : "ClickHouse"}
+            </span>
           </p>
         </div>
         <button
@@ -90,20 +115,55 @@ export default function OnboardingPage() {
         <Step
           n={2}
           icon={<Database className="size-4" />}
-          title="ClickHouse"
-          state={loading ? "pending" : chOk ? "ok" : "fail"}
+          title={remote ? "openaqi" : "ClickHouse"}
+          state={loading ? "pending" : storeOk ? "ok" : "fail"}
           summary={
-            chOk
-              ? `Connected — v${health?.clickhouse.version}, ${(health?.clickhouse.rows ?? 0).toLocaleString()} rows stored`
-              : (health?.clickhouse.error ?? "Not reachable")
+            storeOk
+              ? remote
+                ? `Station "${health?.store.station?.name}" — ${(health?.store.rows ?? 0).toLocaleString()} readings stored for you`
+                : `Connected — v${health?.store.version}, ${(health?.store.rows ?? 0).toLocaleString()} rows stored`
+              : (health?.store.error ?? "Not reachable")
           }
         >
-          {!chOk && (
+          {/* The remediation differs entirely by mode, and telling somebody
+              running without a database to check their database credentials is
+              how a setup screen wastes an evening. */}
+          {!storeOk && remote && (
+            <p className="text-sm text-muted-foreground">
+              Check <code className="rounded bg-muted px-1">OPENAQI_KEY</code>. It must belong to a
+              station registered at openaqi.net. There is no local database in this mode — your
+              history is read back from openaqi.
+            </p>
+          )}
+          {!storeOk && !remote && (
             <p className="text-sm text-muted-foreground">
               Check <code className="rounded bg-muted px-1">CLICKHOUSE_URL</code>,{" "}
               <code className="rounded bg-muted px-1">CLICKHOUSE_USER</code> and{" "}
               <code className="rounded bg-muted px-1">CLICKHOUSE_PASSWORD</code>. The table is created
               automatically once the credentials work.
+            </p>
+          )}
+          {storeOk && remote && health?.store.station?.firstReading && (
+            <p className="text-sm text-muted-foreground">
+              Your record starts {new Date(health.store.station.firstReading).toLocaleString()} —
+              readings from before forwarding was switched on are not there.
+            </p>
+          )}
+          {/* Enabled is not the same as arriving. This is the line that would
+              have caught a key that never reached the process. */}
+          {storeOk && mode === "both" && health?.store.remote && (
+            <p className="text-sm text-muted-foreground">
+              Also forwarding to openaqi — {health.store.remote.readings.toLocaleString()} readings
+              received, last{" "}
+              {health.store.remote.lastReading
+                ? new Date(health.store.remote.lastReading).toLocaleTimeString()
+                : "never"}
+              .
+            </p>
+          )}
+          {storeOk && mode === "both" && !health?.store.remote && health?.openaqi.enabled && (
+            <p className="text-sm text-(--status-warn)">
+              Forwarding is switched on but openaqi has not confirmed any readings yet.
             </p>
           )}
         </Step>
@@ -145,15 +205,22 @@ export default function OnboardingPage() {
           state={loading ? "pending" : flowing ? "ok" : ready ? "pending" : "idle"}
           summary={
             flowing
-              ? `${health?.collector.received.toLocaleString()} readings received, ${health?.collector.written.toLocaleString()} rows written`
+              ? remote
+                ? `${health?.collector.received.toLocaleString()} readings received, ${(health?.openaqi.sent ?? 0).toLocaleString()} forwarded to openaqi`
+                : `${health?.collector.received.toLocaleString()} readings received, ${health?.collector.written.toLocaleString()} rows written`
               : ready
                 ? "Waiting for the first reading…"
                 : "Blocked by the checks above"
           }
         >
-          {health?.collector.lastWriteError && (
+          {!remote && health?.collector.lastWriteError && (
             <p className="text-sm text-(--status-warning)">
               Write error: {health.collector.lastWriteError}
+            </p>
+          )}
+          {remote && (health?.openaqi.halted || health?.openaqi.lastError) && (
+            <p className="text-sm text-(--status-warning)">
+              {health.openaqi.halted ?? health.openaqi.lastError}
             </p>
           )}
           {health?.collector.error && (

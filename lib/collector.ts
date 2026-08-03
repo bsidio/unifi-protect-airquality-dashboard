@@ -2,7 +2,8 @@ import "server-only";
 
 import { EventEmitter } from "node:events";
 
-import { ensureSchema, insertReadings, type Row } from "./clickhouse";
+import type { Row } from "./clickhouse";
+import { ensureSchema, insertReadings, writesLocally } from "./store";
 import { env } from "./env";
 import { METRIC_KEYS } from "./metrics";
 import { forward, startForwarder, stopForwarder } from "./openaqi";
@@ -159,7 +160,11 @@ export async function startCollector(): Promise<void> {
         s.status.received += 1;
         s.status.lastReadingAt = reading.ts;
         s.latest.set(reading.sensorId, reading);
-        s.buffer.push(...toRows(reading));
+        // Skipped entirely when there is no local database, so `written`
+        // stays an honest zero instead of counting rows into a void — and so
+        // flush() has nothing to retry forever against a store that is not
+        // there.
+        if (writesLocally()) s.buffer.push(...toRows(reading));
         // Queued, never awaited: contributing must not be able to slow down
         // the local path that everything else depends on.
         forward(reading);

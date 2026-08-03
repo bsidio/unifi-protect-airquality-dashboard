@@ -2,6 +2,7 @@ import "server-only";
 
 import { env } from "./env";
 import type { Reading } from "./protect";
+import { OPENAQI_UNSUPPORTED } from "./metrics";
 
 /**
  * Optional: contribute this sensor's readings to openaqi.net.
@@ -63,7 +64,7 @@ declare global {
  * Everything else the console reports uses the same key names openaqi does,
  * which is not a coincidence: its catalogue took those names from this sensor.
  */
-const NOT_ACCEPTED = new Set(["vape"]);
+const NOT_ACCEPTED = new Set(OPENAQI_UNSUPPORTED);
 
 /** Above this, the oldest readings are dropped. A day of one sensor is a few
  *  thousand points, so this is roughly a week of backlog. */

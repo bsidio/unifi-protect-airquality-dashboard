@@ -10,5 +10,11 @@ export default function Page() {
   // A misconfigured install should land on onboarding, not a broken dashboard.
   if (configIssues().length > 0) redirect("/onboarding");
   ensureCollector();
-  return <Dashboard appName={env.appName} authEnabled={env.auth.enabled} />;
+  return (
+    <Dashboard
+      appName={env.appName}
+      authEnabled={env.auth.enabled}
+      storeMode={env.store.mode}
+    />
+  );
 }

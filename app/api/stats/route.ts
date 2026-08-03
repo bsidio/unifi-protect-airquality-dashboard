@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { stats } from "@/lib/clickhouse";
+import { stats } from "@/lib/store";
 import { METRICS } from "@/lib/metrics";
 
 export const dynamic = "force-dynamic";
@@ -33,8 +33,13 @@ export async function GET(req: Request) {
   const fromMs = Number(q.get("from")) || toMs - (Number(q.get("range")) || 60) * 60_000;
 
   try {
-    const rows = await stats({ sensorId: sensor, fromMs, toMs, thresholds: elevatedThresholds() });
-    return NextResponse.json({ from: fromMs, to: toMs, stats: rows });
+    const { stats: rows, provenance } = await stats({
+      sensorId: sensor,
+      fromMs,
+      toMs,
+      thresholds: elevatedThresholds(),
+    });
+    return NextResponse.json({ from: fromMs, to: toMs, stats: rows, provenance });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

@@ -188,6 +188,48 @@ python3 tools/server.py          # minimal local dashboard, no ClickHouse
 
 It reads the same root `.env`.
 
+## Where readings are stored
+
+By default this dashboard keeps everything in a ClickHouse you run. It does not
+have to.
+
+```bash
+STORE=clickhouse   # a database you host. Nothing is forwarded.
+STORE=openaqi      # no local database; openaqi keeps your history for you.
+STORE=both         # written locally and forwarded. Read locally.
+```
+
+Leave `STORE` unset and nothing changes: it resolves to `both` when
+`OPENAQI_KEY` is set and `clickhouse` when it is not, which is what your install
+is already doing.
+
+**`STORE=openaqi` is the low-maintenance option.** You are already sending these
+readings; this reads them back, so there is no database to stand up, back up, or
+watch fill a disk. Set `OPENAQI_KEY` and drop the `CLICKHOUSE_*` variables
+entirely.
+
+It is an honest trade, and worth knowing the terms before you pick it:
+
+| | `clickhouse` | `openaqi` |
+|---|---|---|
+| History before you switched forwarding on | kept | not there — nothing is backfilled |
+| `vape` | charted | live only; openaqi has no such metric |
+| CSV `status` column | the sensor's own word | empty; openaqi stores numbers |
+| Long windows | exact, from raw rows | from averages, so p95 is understated |
+| If the store is unreachable | local, so rarely | no history until it returns |
+| Resolution | raw | raw up to 2h, then bucketed |
+
+The dashboard says which of these apply as they happen rather than leaving you
+to work it out: the footer names the backend, a chip appears on the statistics
+when they came from averages, and `vape` is marked *live only*.
+
+**A note on comparing the two.** The numbers will not match exactly, and that is
+not a bug. The local writer de-duplicates — it stores a row only when a value
+changes — while the forwarder sends every reading. So ClickHouse holds change
+events and openaqi holds the full stream, which moves `avg`, `p50`, `p95` and
+the sample count. The figures built to survive this are `seconds_above` and
+`seconds_total`: they are duration-weighted, so they mean the same thing in both.
+
 ## Contribute to openaqi (optional)
 
 Your sensor is measuring air quality in a place official monitoring almost

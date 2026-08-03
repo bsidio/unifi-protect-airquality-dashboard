@@ -24,12 +24,14 @@ import {
   SEVERITY_LABEL,
   SEVERITY_ORDER,
   toneOfSeverity,
+  OPENAQI_UNSUPPORTED,
   type MetricGroup,
   type MetricKey,
 } from "@/lib/metrics";
 import { Heatmap, VentilationCard } from "@/components/insights";
 import { usePersistentState } from "@/lib/use-persistent-state";
 import { cn } from "@/lib/utils";
+import type { StoreMode } from "@/lib/store-types";
 
 type Device = {
   sensor_id: string;
@@ -103,7 +105,19 @@ const TONE_DOT: Record<string, string> = {
   critical: "bg-(--status-critical)",
 };
 
-export function Dashboard({ appName, authEnabled }: { appName: string; authEnabled: boolean }) {
+export function Dashboard({
+  appName,
+  authEnabled,
+  storeMode,
+}: {
+  appName: string;
+  authEnabled: boolean;
+  storeMode: StoreMode;
+}) {
+  // openaqi has no `vape` — it is a UniFi-specific index with no published
+  // health meaning, so it is never forwarded and has no history to chart. The
+  // live value still arrives over the stream.
+  const liveOnly = storeMode === "openaqi" ? OPENAQI_UNSUPPORTED : [];
   const [devices, setDevices] = useState<Device[]>([]);
   const [reading, setReading] = useState<Reading | null>(null);
   const [connected, setConnected] = useState(false);
@@ -128,6 +142,10 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
   const [loading, setLoading] = useState(true);
   const [seriesError, setSeriesError] = useState<string | null>(null);
   const [stats, setStats] = useState<Record<string, MetricStat>>({});
+  // What the statistics were computed FROM. Raw locally; remotely the API
+  // may have had to bucket a wide window, and averages flatten the tail — a
+  // p95 off 15-minute means is understated, and saying so costs one chip.
+  const [basis, setBasis] = useState<string>("raw");
   const [dragging, setDragging] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
 
@@ -229,12 +247,16 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
       }
       fetch(`/api/stats?${sq}`, { cache: "no-store" })
         .then((r) => r.json())
-        .then((j) =>
+        .then((j) => {
           setStats(
             Object.fromEntries(((j.stats ?? []) as MetricStat[]).map((x) => [x.metric, x])),
-          ),
-        )
-        .catch(() => setStats({}));
+          );
+          setBasis(j.provenance?.basis ?? "raw");
+        })
+        .catch(() => {
+          setStats({});
+          setBasis("raw");
+        });
     } catch (e) {
       setSeriesError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -512,22 +534,36 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
                     Stacked
                   </Chip>
                 ) : (
-                  list.map((m) => (
-                    <Chip
-                      key={m.key}
-                      on={selected.includes(m.key)}
-                      onClick={() =>
-                        setSelected(
-                          selected.includes(m.key)
-                            ? selected.filter((k) => k !== m.key)
-                            : [...selected, m.key],
-                        )
-                      }
-                      title={m.description}
-                    >
-                      {m.label}
-                    </Chip>
-                  ))
+                  list.map((m) => {
+                    // Selectable, and deliberately not auto-deselected: the
+                    // choice is the user's and is remembered between visits.
+                    // Marking it beats silently dropping it, and the live value
+                    // still arrives over the stream — only the history is gone.
+                    const noHistory = liveOnly.includes(m.key);
+                    return (
+                      <Chip
+                        key={m.key}
+                        on={selected.includes(m.key)}
+                        onClick={() =>
+                          setSelected(
+                            selected.includes(m.key)
+                              ? selected.filter((k) => k !== m.key)
+                              : [...selected, m.key],
+                          )
+                        }
+                        title={
+                          noHistory
+                            ? `${m.label} — live only. openaqi does not store this metric, so there is no history to chart.`
+                            : m.description
+                        }
+                      >
+                        {m.label}
+                        {noHistory && (
+                          <span className="ml-1 text-muted-foreground/60">· live only</span>
+                        )}
+                      </Chip>
+                    );
+                  })
                 )}
               </div>
             ))}
@@ -726,7 +762,9 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
                       </div>
                     </figcaption>
 
-                    {!isStack && stats[m!.key] && <StatStrip stat={stats[m!.key]} metricKey={m!.key} />}
+                    {!isStack && stats[m!.key] && (
+                      <StatStrip stat={stats[m!.key]} metricKey={m!.key} basis={basis} />
+                    )}
 
                     {isStack ? (
                       <StackedParticulateChart points={points} />
@@ -756,7 +794,11 @@ export function Dashboard({ appName, authEnabled }: { appName: string; authEnabl
         <footer className="flex items-center gap-2 pb-6 pt-2 text-[11px] text-muted-foreground/60">
           <Activity className="size-3" />
           {device
-            ? `${Number(device.points).toLocaleString()} rows stored in ClickHouse`
+            ? storeMode === "openaqi"
+              ? `${Number(device.points).toLocaleString()} readings stored in openaqi · no local database`
+              : storeMode === "both"
+                ? `${Number(device.points).toLocaleString()} rows stored in ClickHouse · forwarding to openaqi`
+                : `${Number(device.points).toLocaleString()} rows stored in ClickHouse`
             : "Streaming from UniFi Protect"}
         </footer>
       </main>
@@ -1039,7 +1081,15 @@ function TableView({ points }: { points: SeriesPoint[] }) {
 }
 
 /** Exact window statistics, computed on raw rows rather than chart buckets. */
-function StatStrip({ stat, metricKey }: { stat: MetricStat; metricKey: string }) {
+function StatStrip({
+  stat,
+  metricKey,
+  basis,
+}: {
+  stat: MetricStat;
+  metricKey: string;
+  basis: string;
+}) {
   const m = METRIC_BY_KEY[metricKey];
   const pct = stat.seconds_total > 0 ? (100 * stat.seconds_above) / stat.seconds_total : 0;
   const cell = (label: string, value: number) => (
@@ -1054,6 +1104,17 @@ function StatStrip({ stat, metricKey }: { stat: MetricStat; metricKey: string })
       {cell("avg", stat.avg)}
       {cell("p95", stat.p95)}
       {cell("max", stat.max)}
+      {/* Averaging kills the tail, so a p95 taken from bucketed data is lower
+          than the truth. Labelled rather than hidden: the figure is still the
+          best available and suppressing it would cost more than the caveat. */}
+      {basis !== "raw" && (
+        <span
+          className="whitespace-nowrap rounded bg-muted px-1 text-muted-foreground/70"
+          title={`Computed from ${basis} averages rather than raw readings — p95 and time-above are understated.`}
+        >
+          {basis} avg
+        </span>
+      )}
       {m.thresholds && (
         <span
           className="ml-auto whitespace-nowrap"

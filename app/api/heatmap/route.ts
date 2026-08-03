@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { heatmap } from "@/lib/clickhouse";
+import { heatmap } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -15,8 +15,8 @@ export async function GET(req: Request) {
   const fromMs = toMs - days * 86_400_000;
 
   try {
-    const cells = await heatmap({ sensorId: sensor, metric, fromMs, toMs });
-    return NextResponse.json({ metric, days, cells });
+    const { cells, provenance } = await heatmap({ sensorId: sensor, metric, fromMs, toMs });
+    return NextResponse.json({ metric, days, cells, provenance });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

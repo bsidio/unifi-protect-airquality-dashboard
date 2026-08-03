@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { ventilation } from "@/lib/clickhouse";
+import { ventilation } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -15,10 +15,10 @@ export async function GET(req: Request) {
   const outdoorPpm = Number(q.get("outdoor")) || 420;
 
   try {
-    const events = await ventilation({ sensorId: sensor, fromMs, toMs, outdoorPpm });
+    const { events, provenance } = await ventilation({ sensorId: sensor, fromMs, toMs, outdoorPpm });
     const achs = events.map((e) => e.ach).sort((a, b) => a - b);
     const median = achs.length ? achs[Math.floor(achs.length / 2)] : null;
-    return NextResponse.json({ days, outdoorPpm, medianAch: median, events });
+    return NextResponse.json({ days, outdoorPpm, medianAch: median, events, provenance });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

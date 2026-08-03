@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { collectorStatus, latestReadings, startCollector } from "@/lib/collector";
-import { health as chHealth } from "@/lib/clickhouse";
+import { health as storeHealth } from "@/lib/store";
 import { configIssues, env } from "@/lib/env";
 import { forwarderStatus } from "@/lib/openaqi";
 import { ProtectClient } from "@/lib/protect";
@@ -70,12 +70,18 @@ async function checkProtect(): Promise<ProtectHealth> {
 /** Powers the onboarding screen: one call, every dependency checked. */
 export async function GET() {
   const issues = configIssues();
-  const clickhouse = await chHealth();
+  const store = await storeHealth();
 
   const protect = await checkProtect();
 
   // A page load is a fine moment to make sure the collector is alive.
-  if (protect.ok && clickhouse.ok) void startCollector();
+  //
+  // Gated on Protect alone. It used to also require the local database, which
+  // made a store-less install impossible to start — and was already
+  // inconsistent with the two other places that start the collector, neither
+  // of which checks a store at all. startCollector() is idempotent, and a
+  // failing write is buffered and retried rather than lost.
+  if (protect.ok) void startCollector();
 
   // This route is reachable WITHOUT auth when AUTH_ENABLED=false, so it must
   // never return internal topology: no console address, no database URL, no
@@ -83,7 +89,16 @@ export async function GET() {
   // install, useless to someone probing the network.
   return NextResponse.json({
     issues,
-    clickhouse,
+    store,
+    // Kept under its old name so an existing scrape or bookmark does not
+    // break; `store` is the one to read.
+    clickhouse: {
+      ok: store.backend === "clickhouse" ? store.ok : false,
+      error: store.backend === "clickhouse" ? store.error : "not in use (STORE=openaqi)",
+      version: store.version,
+      rows: store.rows,
+      tableExists: store.tableExists,
+    },
     protect,
     collector: collectorStatus(),
     // Counters and the last error only — never the key, and never a reading.
