@@ -100,8 +100,28 @@ middleware compiles its env in.
 | `COLLECTOR_ENABLED` | Set `false` to run the UI without ingesting |
 | `COLLECTOR_FLUSH_MS` | Batch insert interval |
 | `COLLECTOR_DEDUPE` | Only write a metric when its value changes |
+| `TEMPERATURE_OFFSET` / `HUMIDITY_OFFSET` | Optional calibration, added to every reading (°C / % RH, default `0`) |
 
 Auth is a signed cookie (HMAC-SHA256, Web Crypto). No session store, no users table.
+
+### Calibration
+
+A sensor mounted near a heat source or in a draught can read consistently off.
+Compare it against a reference sensor placed right beside it, then set the
+difference as an offset — e.g. `TEMPERATURE_OFFSET=1.1` and `HUMIDITY_OFFSET=-7`
+for a unit that reads 1.1 °C low and 7 % RH high. Offsets are applied as
+readings arrive, so the live view, stored data, statistics and level bands all
+use the corrected value; UniFi's own status word is left as sent.
+
+History stored before the offset was set stays uncorrected. To bring it in line,
+run a one-off update with the cut-over time (UTC) of your restart:
+
+```sql
+ALTER TABLE unifi_aq.readings UPDATE value = round(value + 1.1, 2)
+WHERE metric = 'temperature' AND ts < toDateTime64('2026-01-01 12:00:00', 3, 'UTC');
+```
+
+Run the same with the opposite sign to undo it.
 
 ## Storage
 

@@ -21,6 +21,12 @@ function num(name: string, fallback: number): number {
   return Number.isFinite(v) && v > 0 ? v : fallback;
 }
 
+/** Like `num`, but zero and negative values are valid and unset means 0. */
+function offset(name: string): number {
+  const v = Number(str(name));
+  return Number.isFinite(v) ? v : 0;
+}
+
 export const env = {
   /** Site name shown in the header and browser tab. */
   get appName() {
@@ -86,6 +92,18 @@ export const env = {
       user: str("AUTH_USER", "admin"),
       password: str("AUTH_PASSWORD"),
       secret: str("APP_SECRET"),
+    };
+  },
+  /**
+   * Fixed corrections for a sensor that reads high or low, e.g. one mounted
+   * near a heat source, checked against a reference sensor beside it. Added to
+   * every reading as it arrives from Protect, so the live view, storage, stats
+   * and level bands all see the corrected value. 0 (the default) changes nothing.
+   */
+  get calibration() {
+    return {
+      temperature: offset("TEMPERATURE_OFFSET"),
+      humidity: offset("HUMIDITY_OFFSET"),
     };
   },
   get collector() {
