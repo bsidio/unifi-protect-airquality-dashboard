@@ -4,6 +4,8 @@ import https from "node:https";
 import { inflateSync } from "node:zlib";
 import WebSocket from "ws";
 
+import { env } from "./env";
+
 /**
  * Realtime UP-AirQuality telemetry from a UniFi Protect console.
  *
@@ -250,6 +252,16 @@ function normalise(air: Record<string, any>): Record<string, MetricSample> {
   for (const [k, v] of Object.entries(air ?? {})) {
     if (v && typeof v === "object" && "value" in v) {
       out[k] = { value: typeof v.value === "number" ? v.value : null, status: String(v.status ?? "unknown") };
+    }
+  }
+  // Calibration is applied here, once per incoming value: partial pushes are
+  // normalised before being merged onto the last full reading, so a value is
+  // never corrected twice. UniFi's own status word is left as sent.
+  const cal = env.calibration;
+  for (const [k, off] of [["temperature", cal.temperature], ["humidity", cal.humidity]] as const) {
+    const s = out[k];
+    if (off !== 0 && s && typeof s.value === "number") {
+      s.value = Math.round((s.value + off) * 100) / 100;
     }
   }
   return out;
